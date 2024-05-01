@@ -83,6 +83,40 @@ where
         }
     }
 
+    // not match, no sub-nodes, no leaf; return: None
+    // match, has sub-nodes, has leaf; return: Some(Ok((new_node_pos, value)))
+    // match, has sub-nodes, no leaf; return Some(Err(new_node_pos))
+    pub fn traverse(
+        &self,
+        mut node_pos: usize,
+        key: &[u8],
+    ) -> Option<std::result::Result<(usize, u32), usize>> {
+        let mut unit = self.get_unit(node_pos)?;
+        for &c in key.iter().take(key.len()) {
+            assert!(!unit.is_leaf());
+            assert_ne!(c, 0); // assumes characters don't have NULL ('\0')
+
+            // try to traverse node
+            node_pos ^= (unit.offset() ^ c as u32) as UnitID;
+            unit = self.get_unit(node_pos)?;
+
+            if unit.label() != c as u32 {
+                return None;
+            }
+        }
+        if !unit.has_leaf() {
+            return Some(Err(node_pos));
+        }
+
+        // traverse node by NULL ('\0')
+        let id = node_pos ^ (unit.offset()) as UnitID;
+        unit = self.get_unit(id)?;
+        assert!(unit.is_leaf());
+        assert!(unit.value() < (1 << 31));
+
+        Some(Ok((node_pos, unit.value())))
+    }
+
     #[inline(always)]
     fn get_unit(&self, index: usize) -> Option<Unit> {
         let b = unsafe {
@@ -281,5 +315,57 @@ mod tests {
             da.common_prefix_search("d".as_bytes()).collect::<Vec<_>>(),
             vec![]
         );
+    }
+
+    #[test]
+    fn test_traverse() {
+        let keyset = &[
+            ("a".as_bytes(), 0),
+            ("ab".as_bytes(), 1),
+            ("aba".as_bytes(), 2),
+            ("ac".as_bytes(), 3),
+            ("acd".as_bytes(), 4),
+        ];
+
+        let da_bytes = DoubleArrayBuilder::build(keyset);
+        assert!(da_bytes.is_some());
+
+        let da = DoubleArray::new(da_bytes.unwrap());
+
+        let mut result = vec![];
+        let mut queue = std::collections::VecDeque::new();
+
+        let key = "a".as_bytes();
+        let node = da.traverse(0, key).unwrap();
+        assert!(node.is_ok());
+        match node {
+            Ok((node_pos, value)) => {
+                result.push(value);
+                queue.push_back(node_pos);
+            }
+            Err(node_pos) => {
+                queue.push_back(node_pos);
+            }
+        }
+
+        while !queue.is_empty() {
+            let node_pos = queue.pop_front().unwrap();
+            for &c in "abcdefghijklmnopqrstuvwxyz".as_bytes() {
+                let node = da.traverse(node_pos, &[c]);
+                if node.is_none() {
+                    continue;
+                }
+                let node = node.unwrap();
+                if node.is_ok() {
+                    let (node_pos, value) = node.unwrap();
+                    result.push(value);
+                    queue.push_back(node_pos);
+                } else {
+                    queue.push_back(node.unwrap_err());
+                }
+            }
+        }
+
+        assert_eq!(result, vec![0, 1, 3, 2, 4]);
     }
 }
